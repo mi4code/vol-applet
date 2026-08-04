@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
+use std::env;
 
 use gtk::gdk::{EventKey, SeatCapabilities};
 use gtk::glib::idle_add_once;
@@ -24,6 +25,11 @@ pub struct Popout {
 }
 unsafe impl Sync for Popout {}
 unsafe impl Send for Popout {}
+
+fn is_wayland() -> bool {
+    env::var("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false)
+        || env::var("WAYLAND_DISPLAY").is_ok()
+}
 
 impl Popout {
     pub fn initialise(app: &Application) {
@@ -95,45 +101,120 @@ impl Popout {
     }
 
     fn set_geomerty(&mut self) {
+        // If explicit placement was provided via --place, use that and skip
+        // tray-icon geometry. On Wayland, prefer gtk-layer-shell for placement.
+        if let Some((px, py)) = OPTIONS.place {
+            if is_wayland() {
+                // Initialize and use gtk-layer-shell to position the window on Wayland
+                // This provides a reliable way to place the popup at exact coordinates.
+                // Note: gtk-layer-shell must be available at build time (system library).
+                #[allow(unused_imports)]
+                use gtk_layer_shell::{Anchor, Edge, Layer};
+                // Safe to ignore errors; if layer-shell calls fail we'll fallback to move_
+                let _ = std::panic::catch_unwind(|| {
+                    gtk_layer_shell::init();
+                    gtk_layer_shell::init_for_window(&self.popout_menu);
+                    // place on top layer
+                    gtk_layer_shell::set_layer(&self.popout_menu, Layer::Top);
+                    // anchor top and left, then set margins to px/py
+                    gtk_layer_shell::set_anchor(&self.popout_menu, Edge::Top, true);
+                    gtk_layer_shell::set_anchor(&self.popout_menu, Edge::Left, true);
+                    gtk_layer_shell::set_margin(&self.popout_menu, Edge::Top, py);
+                    gtk_layer_shell::set_margin(&self.popout_menu, Edge::Left, px);
+                });
+            } else {
+                // X11: we can just move the window
+                self.popout_menu.move_(px, py);
+            }
+            return;
+        }
+
+        // Default behavior: try to use tray icon geometry (on X11 or if provided by a tray bridge).
         self.popout_menu.set_size_request(320, 50);
         let (window_x, window_y) = self.popout_menu.position();
         let (window_width, window_height) = self.popout_menu.size();
 
-        let (icon, orientation) = TrayIcon::get_geometry();
+        // Try to get tray geometry; TrayIcon::get_geometry() returns Option when not available
+        let geom = TrayIcon::get_geometry();
 
+        // If geometry is available, use it
+        if let Some((icon, orientation)) = geom {
+            let display = self.popout_menu.display();
+            let monitor = display.monitor_at_point(window_x, window_y).unwrap();
+            let monitor = monitor.geometry();
+
+            #[allow(unused)]
+            let mut x = 0;
+            #[allow(unused)]
+            let mut y = 0;
+
+            if orientation == 1 {
+                if icon.x + icon.width + window_width <= monitor.x() + monitor.width() {
+                    x = icon.x + icon.width;
+                } else {
+                    x = icon.x - window_width;
+                }
+                if icon.y + window_height <= monitor.y() + monitor.height() {
+                    y = icon.y;
+                } else {
+                    y = monitor.y() + monitor.height() - window_height;
+                }
+            } else {
+                if icon.y + icon.height + window_height <= monitor.y() + monitor.height() {
+                    y = icon.y + icon.height;
+                } else {
+                    y = icon.y - window_height;
+                }
+                if icon.x + window_width <= monitor.x() + monitor.width() {
+                    x = icon.x;
+                } else {
+                    x = monitor.x() + monitor.width() - window_width;
+                }
+            }
+
+            self.popout_menu.move_(x, y);
+            return;
+        }
+
+        // Fallback: attempt to place near the pointer (useful on Wayland when tray geometry not available)
         let display = self.popout_menu.display();
-        let monitor = display.monitor_at_point(window_x, window_y).unwrap();
-        let monitor = monitor.geometry();
 
-        #[allow(unused)]
-        let mut x = 0;
-        #[allow(unused)]
-        let mut y = 0;
+        // Try to get pointer position via default seat
+        if let Some(seat) = display.default_seat() {
+            // Try pointer
+            if let Some(pointer) = seat.pointer() {
+                if let Ok(pos) = pointer.position() {
+                    // position returns (f64,f64)
+                    let (px, py) = pos;
+                    let px = px as i32;
+                    let py = py as i32;
 
-        if orientation == 1 {
-            if icon.x + icon.width + window_width <= monitor.x() + monitor.width() {
-                x = icon.x + icon.width;
-            } else {
-                x = icon.x - window_width;
-            }
-            if icon.y + window_height <= monitor.y() + monitor.height() {
-                y = icon.y;
-            } else {
-                y = monitor.y() + monitor.height() - window_height;
-            }
-        } else {
-            if icon.y + icon.height + window_height <= monitor.y() + monitor.height() {
-                y = icon.y + icon.height;
-            } else {
-                y = icon.y - window_height;
-            }
-            if icon.x + window_width <= monitor.x() + monitor.width() {
-                x = icon.x;
-            } else {
-                x = monitor.x() + monitor.width() - window_width;
+                    // Attempt to ensure popup fits on monitor
+                    if let Some(m) = display.monitor_at_point(px, py) {
+                        let mon = m.geometry();
+                        let mut x = px;
+                        let mut y = py;
+                        if x + window_width > mon.x() + mon.width() {
+                            x = mon.x() + mon.width() - window_width;
+                        }
+                        if y + window_height > mon.y() + mon.height() {
+                            y = mon.y() + mon.height() - window_height;
+                        }
+                        self.popout_menu.move_(x, y);
+                        return;
+                    } else {
+                        self.popout_menu.move_(px, py);
+                        return;
+                    }
+                }
             }
         }
 
+        // Last resort: center on primary monitor
+        let monitor = display.primary_monitor().unwrap();
+        let mon = monitor.geometry();
+        let x = mon.x() + (mon.width() - window_width) / 2;
+        let y = mon.y() + (mon.height() - window_height) / 2;
         self.popout_menu.move_(x, y);
     }
 
