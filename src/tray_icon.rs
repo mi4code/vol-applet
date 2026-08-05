@@ -110,17 +110,37 @@ impl TrayIcon {
         }
     }
 
-    pub fn get_geometry() -> (GdkRectangle, GtkOrientation) {
-        let icon_ptr = TRAY_ICON.lock().unwrap().as_mut().unwrap().icon_ptr;
+    // Try to get the tray icon geometry. On Wayland this may not be available
+    // (tray icons are not a native concept); return None in that case and the
+    // caller can fall back to using the pointer position.
+    pub fn get_geometry() -> Option<(GdkRectangle, GtkOrientation)> {
+        let guard = TRAY_ICON.lock().unwrap();
+        let icon_ptr = match guard.as_ref() {
+            Some(t) => t.icon_ptr,
+            None => return None,
+        };
 
         let area = Box::new(GdkRectangle::default());
         let orient = Box::<GtkOrientation>::new(GtkOrientation::MAX);
         unsafe {
             let area_ptr = Box::into_raw(area);
             let orient_ptr = Box::into_raw(orient);
+            // gtk_status_icon_get_geometry may fail to provide meaningful data on Wayland.
             gtk_status_icon_get_geometry(icon_ptr, std::ptr::null_mut(), area_ptr, orient_ptr);
-            #[allow(clippy::clone_on_copy)]
-            ((*area_ptr).clone(), (*orient_ptr).clone())
+
+            let area_val = (*area_ptr).clone();
+            let orient_val = (*orient_ptr).clone();
+
+            // Clean up the boxes we leaked into raw pointers
+            let _ = Box::from_raw(area_ptr);
+            let _ = Box::from_raw(orient_ptr);
+
+            // If geometry appears empty, treat as unavailable.
+            if area_val.width == 0 && area_val.height == 0 {
+                None
+            } else {
+                Some((area_val, orient_val))
+            }
         }
     }
 
