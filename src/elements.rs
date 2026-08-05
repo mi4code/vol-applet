@@ -42,7 +42,8 @@ impl VolumeSlider {
         let volume_slider = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
         volume_slider.set_draw_value(false);
         volume_slider.set_value(start_value as f64);
-        volume_slider.connect_change_value(move |_, _, d: f64| -> glib::signal::Inhibit {
+        // return type for the closure is gtk::Inhibit
+        volume_slider.connect_change_value(move |_, _, d: f64| -> gtk::Inhibit {
             on_change_vol(d as f32);
             gtk::Inhibit(false)
         });
@@ -168,15 +169,11 @@ fn get_icon(type_: &VolumeType, icon_name: Option<String>) -> gtk::Image {
             gtk::Image::from_icon_name(Some("audio-input-microphone"), gtk::IconSize::LargeToolbar)
         }
         VolumeType::Stream => icon_name
-            .bind(|name| {
+            .and_then(|name| {
                 gtk::IconTheme::default()
-                    .bind(|theme| {
-                        Some(theme.load_icon(&name, 64, gtk::IconLookupFlags::FORCE_SIZE))
-                    })
-                    .bind(|icon| icon.ok())
-                    .bind(|icon| icon)
-                    .bind(|icon| icon.scale_simple(24, 24, gtk::gdk_pixbuf::InterpType::Bilinear))
-                    .bind(|pixbuf| Some(gtk::Image::from_pixbuf(Some(&pixbuf))))
+                    .and_then(|theme| theme.load_icon(&name, 64, gtk::IconLookupFlags::FORCE_SIZE).ok())
+                    .and_then(|icon| icon.scale_simple(24, 24, gtk::gdk_pixbuf::InterpType::Bilinear))
+                    .map(|pixbuf| gtk::Image::from_pixbuf(Some(&pixbuf)))
             })
             .unwrap_or_else(|| {
                 gtk::Image::from_icon_name(
