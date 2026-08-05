@@ -4,11 +4,11 @@ version = "0.2.2"
 edition = "2021"
 
 [dependencies]
-# Use a recent gtk compatible with gtk-layer-shell; let Cargo pick the matching sys crates
+# Use a recent gtk compatible with gtk-layer-shell; specify matching sys crates
 gtk = "0.18.2"
-#gtk-sys = "0.16.0"
-#gdk-sys = "0.16.0"
-gobject-sys = "0.17.0"
+gtk-sys = "0.18.2"
+gdk-sys = "0.18.2"
+gobject-sys = "0.18.2"
 libpulse-sys = "1.20.1"
 once_cell = "1.17.1"
 owo-colors = "3.5.0"
