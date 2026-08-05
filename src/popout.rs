@@ -4,9 +4,9 @@ use std::sync::Mutex;
 use std::env;
 
 use gtk::gdk::{EventKey, SeatCapabilities};
-use gtk::glib::idle_add_once;
-use gtk::traits::{ContainerExt, ExpanderExt, GtkWindowExt, WidgetExt};
-use gtk::{Application, ApplicationWindow, Inhibit};
+use gtk::glib::{idle_add_once, Inhibit};
+use gtk::prelude::{ContainerExt, ExpanderExt, GtkWindowExt, WidgetExt, MonitorExt, SeatExt};
+use gtk::{Application, ApplicationWindow};
 
 use crate::audio::reload_outputs_in_popout;
 use crate::audio::shared_output_list::{self, VolumeType};
@@ -109,7 +109,7 @@ impl Popout {
                 // This provides a reliable way to place the popup at exact coordinates.
                 // Note: gtk-layer-shell must be available at build time (system library).
                 #[allow(unused_imports)]
-                use gtk_layer_shell::{Anchor, Edge, Layer};
+                use gtk_layer_shell::{Edge, Layer};
                 // Safe to ignore errors; if layer-shell calls fail we'll fallback to move_
                 let _ = std::panic::catch_unwind(|| {
                     gtk_layer_shell::init();
@@ -347,151 +347,3 @@ fn add_outputs_from_list(popout: &mut Popout, container: gtk::Box) {
 }
 
 fn create_grouped(
-    outputs: Vec<shared_output_list::Output>,
-    popout: &mut Popout,
-    container: gtk::Box,
-) {
-    let inputs = gtk::Expander::builder().label("Inputs").build();
-
-    let inputs_container = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .margin_top(10)
-        .build();
-
-    inputs.add(&inputs_container);
-
-    let streams = gtk::Expander::builder().label("Streams").build();
-
-    let streams_container = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .margin_top(10)
-        .build();
-
-    streams.add(&streams_container);
-
-    inputs.connect_expanded_notify(|_| {
-        reposition_once_resized();
-    });
-
-    streams.connect_expanded_notify(|_| {
-        reposition_once_resized();
-    });
-
-    for output in outputs {
-        let id = output.id.clone();
-
-        let slider = Box::new(match output.type_ {
-            VolumeType::Sink => {
-                let is_default = output.is_default();
-                popout.append_volume_slider(&container, output, is_default)
-            }
-            VolumeType::Stream => popout.append_volume_slider(&streams_container, output, false),
-            VolumeType::Input => popout.append_volume_slider(&inputs_container, output, false),
-        });
-
-        popout.sliders.insert(id, slider);
-    }
-
-    if OPTIONS.show_inputs {
-        popout.container.add(&inputs);
-    }
-
-    if OPTIONS.show_streams {
-        popout.container.add(&streams);
-    }
-}
-
-fn reposition_once_resized() {
-    // HACK: This is a hack to fix the issue where the popout doesn't resize
-    //       for a little while.
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let mut a = POPOUT.lock().unwrap();
-        let popout = a.as_mut().unwrap();
-        popout.set_geomerty();
-    });
-}
-
-fn remove_child_widgets(popout: &mut Popout) {
-    popout.container.foreach(|w| {
-        popout.container.remove(w);
-    });
-}
-
-fn handle_volume_slider_change(is_default: bool, vol: f32, id: String) {
-    let vol = clamp_volume_to_percent(vol);
-
-    if (vol - shared_output_list::get_stored_volume(&id)).abs() < 2. {
-        return;
-    }
-
-    Popout::set_specific_volume_label(id.clone(), vol);
-
-    if is_default {
-        TrayIcon::set_volume(vol);
-    }
-    Popout::set_ignore_next_callback();
-
-    let type_ = shared_output_list::type_of(&id);
-    AUDIO.lock().unwrap().aud.set_volume(id, vol, type_);
-}
-
-fn clamp_volume_to_percent(vol: f32) -> f32 {
-    if vol > 100. {
-        100.
-    } else if vol < 0. {
-        0.
-    } else {
-        vol
-    }
-}
-
-fn handle_mute_button(id: String) {
-    let type_ = shared_output_list::type_of(&id);
-
-    let mut muted = false;
-    {
-        let mut list = shared_output_list::OUTPUT_LIST.lock().unwrap();
-        Popout::set_ignore_next_callback();
-        for output in list.iter_mut() {
-            if output.id == id {
-                muted = !output.muted;
-                output.muted = muted;
-                if output.is_default() {
-                    TrayIcon::set_muted(muted);
-                }
-                break;
-            }
-        }
-    }
-
-    Popout::set_specific_muted(id.clone(), muted);
-
-    AUDIO.lock().unwrap().aud.set_muted(id, muted, type_);
-}
-
-fn grab_seat(popout: &gtk::gdk::Window) {
-    let display = popout.display();
-    let seat = display.default_seat().unwrap();
-
-    let capabilities = gdk_sys::GDK_SEAT_CAPABILITY_POINTER;
-
-    let status = seat.grab(
-        popout,
-        unsafe { SeatCapabilities::from_bits_unchecked(capabilities) },
-        true,
-        None,
-        None,
-        None,
-    );
-
-    if status != gtk::gdk::GrabStatus::Success {
-        println!("Grab failed: {:?}", status);
-    }
-}
-
-// fn ungrab(popout: &gtk::gdk::Window) {
-//     let display = popout.display();
-//     let seat = display.default_seat().unwrap();
-//     seat.ungrab();
-// }
